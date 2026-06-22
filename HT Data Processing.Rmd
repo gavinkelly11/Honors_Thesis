@@ -1,0 +1,113 @@
+---
+title: "HT Data Processing"
+author: "Gavin Kelly"
+date: "2026-06-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(dplyr)
+library(tidyr)
+library(readxl)
+set.seed(15213)
+```
+
+Load the original data set.
+
+```{r}
+og_data <- read.csv("BAR_SelfReport_Behavioral_7.30.24.csv")
+```
+
+```{r}
+HT_behavioral_data <- og_data %>%
+  select(1:33)
+```
+
+
+Load the extra pars
+
+```{r}
+extra_pars <- read_excel("HT_extra_pars.xlsx")
+extra_pars <- rename(extra_pars, Sub_ID = SUB_ID)
+```
+
+
+
+Select columns of interest
+
+```{r}
+select_variables <- function(dat) {
+  #BASELINE/DEMOGRAPHIC VARIABLES
+  dat_fin <- dat %>%
+  select("Group_ID", "Sub_ID", "COVID", "Group_Cndn", "GenderComp", "Sex", "Age_B", "HighGrd_B", "Race_B", 
+#TLFB
+"TLFB_Date_B", "TLFBQnt_B", "TLFBFrq_B", "TLFBFrqWk_B", "TLFBAvg_B", "TLFBBng_B", "TLFBHigh_B",
+#AUDIT/SCID
+"AUDIT_1_B","AUDIT_2_B","AUDIT_3_B","AUDIT_4_B","AUDIT_5_B", "AUDIT_6_B", "AUDIT_7_B", "AUDIT_8_B","AUDIT_9_B","AUDIT_10_B","AUDIT_Total_B","SCID_Score_B", 
+#SIAS
+"SIAS1_B", "SIAS2_B", "SIAS3_B", "SIAS4_B","SIAS5_B", "SIAS6_B", "SIAS7_B", "SIAS8_B", "SIAS9_B", "SIAS10_B", "SIAS11_B", "SIAS12_B", "SIAS13_B", "SIAS14_B", "SIAS15_B", "SIAS16_B", "SIAS17_B", "SIAS18_B", "SIAS19_B", "SIAS20_B", "SIASTotal_B", 
+#INTOXICATION
+"SIS_PreDrnk", "SIS_PostDrnk",  
+#8-MM
+"EightMMPositive_ExB", "EightMMNegative_ExB", "EightMMPositive_PD", "EightMMNegative_PD", 
+#STAI
+"STAICalm_ExB", "STAISecure_ExB", "STAIUpset_ExB", "STAIFright_ExB", "STAIConf_ExB", "STAIWorry_ExB", "STAI_Total_ExB", "STAI_Score_ExB", "STAICalm_PD", "STAISecure_PD", "STAIUpset_PD", "STAIFright_PD", "STAIConf_PD", "STAIWorry_PD", "STAI_Total_PD", "STAI_Score_PD", 
+#BAES (STIMULATION ONLY)
+"BAESElate_ExB", "BAESEnerg_ExB", "BAESExcite_ExB", "BAESStim_ExB", "BAESTalk_ExB", "BAESUp_ExB", "BAESVig_ExB", "BAESStimulation_ExB", "BAESElate_PD", "BAESEnerg_PD", "BAESExcite_PD", "BAESStim_PD", "BAESTalk_PD", "BAESUp_PD", "BAESVig_PD", "BAESStimulation_PD", 
+#RELIEF, ESTIMATED OZ ALC, PGRS
+"Rlv_PostDrnk", "OzEst_EC", "PGRSMean_PD")
+  
+  return(dat_fin)
+}
+```
+
+Slice the data on the participant level
+
+```{r}
+ht_data <- select_variables(og_data)
+ht_sr_data <- ht_data %>%
+  group_by(Sub_ID) %>%
+  slice(1) %>%
+  ungroup()
+``` 
+
+Do the same for the extra pars
+
+```{r}
+extra_pars <- select_variables(extra_pars)
+extra_pars <- extra_pars %>%
+  group_by(Sub_ID) %>%
+  slice(1) %>%
+  ungroup()
+extra_pars$TLFB_Date_B <- as.character(extra_pars$TLFB_Date_B)
+```
+
+
+Merge the two dfs.
+
+```{r}
+HT_selfreport_data <- bind_rows(ht_sr_data, extra_pars) |>
+  group_by(Sub_ID) |>
+  summarise(across(everything(), ~ first(na.omit(.x))), .groups = "drop")
+```
+
+
+Check the SIAS data is complete and randomization was successful
+
+```{r}
+# for (i in 29:49) {
+#   print(sum(is.na(HT_selfreport_data[[i]])))
+#   print(range(HT_selfreport_data[[i]], na.rm = T))
+# }
+t.test(SIASTotal_B ~ Group_Cndn, data = HT_selfreport_data)
+```
+
+Save as csv.
+
+```{r}
+write.csv(HT_selfreport_data, file = "HT_selfreport_data.csv")
+write.csv(HT_behavioral_data, file = "HT_behavioral_data.csv")
+```
+

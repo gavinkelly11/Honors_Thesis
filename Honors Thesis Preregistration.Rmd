@@ -1,0 +1,514 @@
+___
+title: "Honors Thesis Preregistration"
+author: "Gavin Kelly"
+date: "2026_06_02"
+output: html_document
+___
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(interactions)
+library(estimatr)
+library(scienceverse)
+library(faux)
+library(tidyverse)
+library(broom)
+library(dplyr)
+library(tidyr)
+library(lme4)
+library(clubSandwich)
+set.seed(15213)
+```
+
+First, data prep. 
+In this case, we will simulate a data set of the same structure as the BAR data.
+
+#Self Report Data Simulation
+
+```{r}
+sr_dv_names <- c("SIAS", "pre_intoxication", "post_intoxication", "pre_PA", "post_PA", 
+              "pre_NA", "post_NA", "relief_NA", "pre_BAES", "post_BAES", "PGRS")
+
+sr_r_matrix_pla <- matrix(0.10, nrow = 11, ncol = 11)
+diag(sr_r_matrix_pla) <- 1 
+sr_r_matrix_pla[1, 8] <- 0.01 #relief NA
+sr_r_matrix_pla[8, 1] <- 0.01
+
+sr_r_matrix_pla[6, 7] <- 0.40  # pre_NA and post_NA
+sr_r_matrix_pla[7, 6] <- 0.40
+sr_r_matrix_pla[1, 6] <- 0.50  # SIAS and pre_NA
+sr_r_matrix_pla[6, 1] <- 0.50
+# Placebo: SIAS and post_NA stays relatively high, no extra decrease
+sr_r_matrix_pla[1, 7] <- 0.50  
+sr_r_matrix_pla[7, 1] <- 0.50
+
+sr_r_matrix_pla[4, 5] <- 0.40  # pre_PA and post_PA
+sr_r_matrix_pla[5, 4] <- 0.40
+sr_r_matrix_pla[1, 4] <- -0.50  # SIAS and pre_PA
+sr_r_matrix_pla[4, 1] <- -0.50
+# Placebo: SIAS and post_PA stays relatively high, no extra decrease
+sr_r_matrix_pla[1, 5] <- -0.50  
+sr_r_matrix_pla[5, 1] <- -0.50
+
+sr_r_matrix_pla <- as.matrix(nearPD(sr_r_matrix_pla, corr = TRUE)$mat)
+
+# --- 2. THE ALCOHOL MATRIX (Huge decrease for high SIAS) ---
+sr_r_matrix_alc <- matrix(0.10, nrow = 11, ncol = 11)
+diag(sr_r_matrix_alc) <- 1 
+sr_r_matrix_alc[1, 8] <- 0.60 #relief NA
+sr_r_matrix_alc[8, 1] <- 0.60
+
+sr_r_matrix_alc[6, 7] <- 0.40  # pre_NA and post_NA
+sr_r_matrix_alc[7, 6] <- 0.40
+sr_r_matrix_alc[1, 6] <- 0.50  # SIAS and pre_NA
+sr_r_matrix_alc[6, 1] <- 0.50
+# Alcohol: SIAS and post_NA drops aggressively to 0.0!
+sr_r_matrix_alc[1, 7] <- 0.00  
+sr_r_matrix_alc[7, 1] <- 0.00
+
+sr_r_matrix_alc[4, 5] <- 0.40  # pre_PA and post_PA
+sr_r_matrix_alc[5, 4] <- 0.40
+sr_r_matrix_alc[1, 4] <- -0.50  # SIAS and pre_PA
+sr_r_matrix_alc[4, 1] <- -0.50
+# Alcohol: SIAS and post_PA drops aggressively to 0.0!
+sr_r_matrix_alc[1, 5] <- 0 
+sr_r_matrix_alc[5, 1] <- 0
+
+sr_r_matrix_alc <- as.matrix(nearPD(sr_r_matrix_alc, corr = TRUE)$mat)
+
+sr_sd_vector <- c(
+  SIAS = 12, pre_intoxication=15, post_intoxication=15, 
+  pre_PA=5, post_PA=5, pre_NA=5, post_NA=5, 
+  relief_NA=5, pre_BAES = 15, post_BAES = 15, PGRS = 2
+)
+
+
+sr_mu_alcohol <- c( SIAS = 40, pre_intoxication=5, post_intoxication=70, 
+  pre_PA=15, post_PA=70, pre_NA=60, post_NA=10, 
+  relief_NA=30, pre_BAES = 5, post_BAES = 70, PGRS = 7.5)
+
+sr_mu_placebo <- c(SIAS = 40, pre_intoxication=5, post_intoxication=45, 
+  pre_PA=15, post_PA=45, pre_NA=60, post_NA=35, 
+  relief_NA=15, pre_BAES = 5, post_BAES = 45, PGRS = 2.5)
+
+sr_df_alc <- rnorm_multi(n = 282, mu = sr_mu_alcohol, sd = sr_sd_vector, r = sr_r_matrix_alc, varnames = sr_dv_names) %>%
+  mutate(condition = "alcohol")
+
+sr_df_pla <- rnorm_multi(n = 111, mu = sr_mu_placebo, sd = sr_sd_vector, r = sr_r_matrix_pla, varnames = sr_dv_names) %>%
+  mutate(condition = "placebo")
+
+
+
+self_report_df <- bind_rows(sr_df_alc, sr_df_pla) %>%
+  mutate(subject = paste0(row_number()), group = paste0(ceiling(row_number()/3))) %>%
+  relocate(last_col():1)
+
+self_report_df$condition <- factor(self_report_df$condition, levels = c("placebo", "alcohol"))
+```
+
+#Self-Report Models Power Analysis
+
+```{r}
+run_sims <- function(n, dv, stand_dev) {
+  p_values <- vector(mode = "numeric", length = n)
+  sim_formula <- as.formula(paste0(dv, " ~ condition * SIAS"))
+  for(i in 1:n) {
+    sim_alc <- rnorm_multi(n = 282, mu = sr_mu_alcohol, sd = sr_sd_vector, 
+                           r = sr_r_matrix_alc, varnames = sr_dv_names) %>%
+               mutate(condition = "alcohol")
+    
+    sim_pla <- rnorm_multi(n = 111, mu = sr_mu_placebo, sd = sr_sd_vector, 
+                           r = sr_r_matrix_pla, varnames = sr_dv_names) %>%
+               mutate(condition = "placebo")
+    
+    sim_df <- bind_rows(sim_alc, sim_pla) %>%
+              mutate(group = paste0(ceiling(row_number()/3))) %>%
+      group_by(group) %>%
+      mutate(
+        group_shift = rnorm(1, mean = 0, sd = stand_dev),
+        !!sym(dv) := !!sym(dv) + group_shift) %>%
+      ungroup()
+    
+    fit_model <- lm_robust(sim_formula, 
+                     data = sim_df, 
+                     clusters = group)
+    p_values[i] <- fit_model$p.value["conditionplacebo:SIAS"]
+  }
+  return(p_values)
+}
+
+simulated_p_values <- run_sims(n = 1000, dv = "relief_NA", stand_dev = 0.5)
+power <- (sum(simulated_p_values < .05)/1000)
+print(power)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+# 1. Set the number of simulations
+n_sims <- 1000
+
+# Create an empty vector to store our p-values
+interaction_p_values <- numeric(n_sims)
+
+# 2. Start the loop
+for(i in 1:n_sims) {
+  
+  # A. Generate the data (using your exact matrices and mu vectors)
+  sim_alc <- rnorm_multi(n = 282, mu = sr_mu_alcohol, sd = sr_sd_vector, 
+                         r = sr_r_matrix_alc, varnames = sr_dv_names) %>%
+             mutate(condition = "alcohol")
+  
+  sim_pla <- rnorm_multi(n = 111, mu = sr_mu_placebo, sd = sr_sd_vector, 
+                         r = sr_r_matrix_pla, varnames = sr_dv_names) %>%
+             mutate(condition = "placebo")
+  
+  sim_df <- bind_rows(sim_alc, sim_pla) %>%
+            mutate(group = paste0(ceiling(row_number()/3)))
+  
+  # B. Run the robust model
+  fit <- lm_robust(post_NA ~ pre_NA + condition * SIAS, 
+                   data = sim_df, 
+                   clusters = group)
+  
+  # C. Extract and save the specific p-value for the interaction term
+  # (Note: the exact name might be "conditionplacebo:SIAS" or "conditionalcohol:SIAS" 
+  # depending on your factor levels. Check your model summary to match the string perfectly).
+  interaction_p_values[i] <- fit$p.value["conditionplacebo:SIAS"]
+  
+}
+
+# 3. Calculate Power!
+# What percentage of those 1,000 p-values were less than .05?
+statistical_power <- mean(interaction_p_values < 0.05)
+
+print(paste("Your statistical power to detect this interaction is:", statistical_power * 100, "%"))
+```
+
+
+#Behavioral Data Simulation
+
+```{r}
+# 1. Create Person-Level Random Effects (Level 2)
+# We calculate a random intercept (overall level) and random slope (trajectory) for each person
+person_level_data <- self_report_df %>%
+  mutate(
+    # Center SIAS so the intercept represents someone with average anxiety
+    SIAS_c = SIAS - mean(SIAS, na.rm = TRUE),
+    
+    # Generate random deviations for each person's intercepts (u0) and slopes (u1)
+    u0_social = rnorm(n(), mean = 0, sd = 4), u1_social = rnorm(n(), mean = 0, sd = 0.1),
+    u0_duchenne = rnorm(n(), mean = 0, sd = 3), u1_duchenne = rnorm(n(), mean = 0, sd = 0.08),
+    u0_laugh = rnorm(n(), mean = 0, sd = 2), u1_laugh = rnorm(n(), mean = 0, sd = 0.05),
+    u0_talk = rnorm(n(), mean = 0, sd = 6), u1_talk = rnorm(n(), mean = 0, sd = 0.2)
+  )
+
+# 2. Expand to Long Format and Generate Time-Level Data (Level 1)
+behavioral_df <- person_level_data %>%
+  # This creates 35 rows for every 1 subject
+  expand_grid(time_bin = 1:35) %>%
+  mutate(
+    # Center time at minute 18. This is the mathematical trick!
+    # It forces the negative SIAS penalty to pull down their OVERALL session average, 
+    # while allowing their slope to still be highly positive.
+    time_c = time_bin - 19.5,
+    alc_boost = ifelse(condition == "alcohol", 5, 0),
+    alc_slope = ifelse(condition == "alcohol", .04, .02),
+    
+    # Generate raw scores using your specific hypotheses
+    # Format: (Base Avg + SIAS Avg Penalty + Random Avg) + (Base Slope + SIAS Slope Boost + Random Slope) * Time + Error
+    
+    social_raw = (15 - 0.4 * SIAS_c + u0_social + alc_boost) + 
+                 (0.2 + (0.02 + alc_slope) * SIAS + u1_social) * time_c + 
+                 rnorm(n(), mean = 0, sd = 4),
+    
+    duchenne_raw = (8 - 0.75 * SIAS_c + u0_duchenne + alc_boost) + 
+                   (0.1 + (0.01 + alc_slope) * SIAS + u1_duchenne) * time_c + 
+                   rnorm(n(), mean = 0, sd = 3),
+    
+    laugh_raw = (5 - 0.15 * SIAS_c + u0_laugh + alc_boost) + 
+                (0.05 + (0.01 + alc_slope) * SIAS + u1_laugh) * time_c + 
+                rnorm(n(), mean = 0, sd = 2),
+    
+    talk_raw = (19 - 0.6 * SIAS_c + u0_talk + alc_boost) + 
+               (0.3 + (0.025 + alc_slope) * SIAS + u1_talk) * time_c + 
+               rnorm(n(), mean = 0, sd = 5)
+  ) %>%
+  
+  # 3. Constrain values to realistic bounds (0 to 60 seconds)
+  # pmin() caps the max at 60, pmax() sets the floor at 0
+  mutate(
+    social_smile = pmin(pmax(round(social_raw, 1), 0), 60),
+    duchenne_smile = pmin(pmax(round(duchenne_raw, 1), 0), 60),
+    laughter = pmin(pmax(round(laugh_raw, 1), 0), 60),
+    talking = pmin(pmax(round(talk_raw, 1), 0), 60)
+  ) %>%
+  
+  # 4. Clean up the dataframe to only include the variables you need for analysis
+  select(subject, group, condition, SIAS, SIAS_c, time_bin, time_c, 
+         social_smile, duchenne_smile, laughter, talking, 
+         pre_NA, post_NA, relief_NA, pre_PA, post_PA) %>%
+  arrange(subject, time_bin)
+
+# View the first few rows of participant 1
+head(behavioral_df, 5)
+```
+
+
+```{r}
+#calculate average for first 3 minutes, get rid of first 3 rows for each participant.
+behavioral_df <- behavioral_df %>%
+  group_by(subject) %>%
+  mutate(baseline_social_smile = mean(social_smile[time_bin %in% 1:3]),
+         baseline_duchenne_smile = mean(duchenne_smile[time_bin %in% 1:3]), 
+         baseline_laughter = mean(laughter[time_bin %in% 1:3]),
+         baseline_talking = mean(talking[time_bin %in% 1:3])) %>%
+  filter(!time_bin %in% 1:3) %>%
+  ungroup()
+
+behavioral_df$condition <- factor(behavioral_df$condition, levels = c("placebo", "alcohol"))
+```
+
+#Behavioral Growth Modeling Formula
+
+```{r}
+# Helper function to run lmer and output robust statistics
+run_robust_growth <- function(dv, baseline_cov, data) {
+  
+  # 1. Build the formula: 
+  # Outcome ~ Time * Condition * SIAS + Baseline Covariate + (Time | Subject)
+  form <- as.formula(paste0(dv, " ~ time_c * SIAS_c * condition + ", baseline_cov, " + (time_c | subject)"))
+  
+  # 2. Run the multilevel model
+  model <- lmer(form, data = data, control = lmerControl(optimizer = "bobyqa"))
+  
+  # 3. Apply the cluster-robust standard errors for the Group nuisance
+  robust_results <- coef_test(model, vcov = "CR2", cluster = data$group)
+  
+  # 4. Clean up the output so scienceverse can read it
+  res_df <- as.data.frame(robust_results)
+  terms <- rownames(res_df)
+  
+  return(list(
+    beta   = setNames(res_df$beta, terms),
+    SE     = setNames(res_df$SE, terms),
+    p_Satt = setNames(res_df$p_Satt, terms)
+  ))
+}
+```
+
+
+# Negative Affect Models
+```{r}
+bar_prereg <- study() %>%
+  add_hypothesis("Associations between Social Anxiety and Negative Affect", 
+                 "We predict a negative association between social anxiety and self-reported change in social anxiety during the drinking session. We predict a positive association between social anxiety and self-reported relief in negative affect during the drinking session. We predict these associations will be stronger for participants in the alcohol condition compared to those in the placebo condition.") %>%
+  
+  add_analysis("Relief of Negative Affect Main Effect", lm_robust(relief_NA ~ SIAS, data = self_report_df, clusters = group)) %>%
+  add_criterion("sig_relief_ME", "p.value['SIAS']", "<", 0.05) %>%
+  add_criterion("pos_relief_ME_direction", "conf.low['SIAS']", ">", 0.0) %>%
+  
+  add_analysis("Relief of Negative Affect Interaction Effect", lm_robust(relief_NA ~ SIAS * condition, data = self_report_df, clusters = group)) %>%
+  add_criterion("sig_relief_IE", "p.value['SIAS:conditionalcohol']", "<", 0.05) %>%
+  add_criterion("pos_relief_IE_direction", "conf.high['SIAS:conditionalcohol']", ">", 0.0) %>%
+# the change in negative affect is more negative for participants higher in SIAS
+  add_analysis("Change in Negative Affect Main Effect", lm_robust(post_NA ~ pre_NA + condition + SIAS, data = self_report_df, clusters = group)) %>%
+  add_criterion("sig_NAchange_ME", "p.value['SIAS']", "<", 0.05) %>%
+  add_criterion("neg_NAchange_ME_direction", "conf.high['SIAS']", "<", 0.0) %>%
+  
+  add_analysis("Change in Negative Affect Interaction Effect", lm_robust(post_NA ~ pre_NA + SIAS * condition, data = self_report_df, clusters = group)) %>%
+  add_criterion("sig_NAchange_IE", "p.value['SIAS']", "<", 0.05) %>%
+  add_criterion("neg_NAchange_IE_direction", "conf.high['SIAS']", "<", 0.0) %>%
+  
+  add_eval("corroboration",
+                  evaluation = "sig_relief_ME & pos_relief_ME_direction & 
+                  sig_relief_IE & pos_relief_IE_direction &
+                  sig_NAchange_ME & neg_NAchange_ME_direction",
+                  description = "Main effect and interaction effect yielded significant p-values and nonzero CIs") %>%
+  
+  add_eval("falsification",
+                  evaluation = "!sig_relief_ME | !pos_relief_ME_direction | 
+                  !sig_relief_IE | !pos_relief_IE_direction |
+                  !sig_NAchange_ME | !neg_NAchange_ME_direction",
+                  description = "Main effect or interaction effect yielded insignificant p-value or a CI including zero")
+```
+
+
+#Positive Affect Models
+```{r}
+bar_prereg <- bar_prereg %>%
+  add_hypothesis("Associations between Social Anxiety and Positive Affect", 
+                 "We predict a positive association between social anxiety and self-reported change in positive affect during the drinking session. We predict a negative association between social anxiety and overall behavioral measures of positive affect (Duchenne smiles and laughter) during the drinking session. However, we predict a positive association between social anxiety and moment-to-moment increases in behavioral measures of positive affect during the drinking session. We predict that these associations will be more positive for participants in the alcohol condition compared to those in the placebo condition.
+") %>%
+# the change in positive affect is more positive for participants higher in SIAS
+  add_analysis("Change in Positive Affect Main Effect", lm_robust(post_PA ~ pre_PA + condition + SIAS, data = self_report_df, clusters = group)) %>%
+  add_criterion("sig_PAchange_ME", "p.value['SIAS']", "<", 0.05) %>%
+  add_criterion("neg_PAchange_ME_direction", "conf.low['SIAS']", ">", 0.0) %>%
+
+  add_analysis("Change in Positive Affect Interaction Effect", lm_robust(post_PA ~ pre_PA + SIAS * condition, data = self_report_df, clusters = group)) %>%
+  add_criterion("sig_PAchange_IE", "p.value['SIAS:conditionalcohol']", "<", 0.05) %>%
+  add_criterion("neg_PAchange_IE_direction", "conf.low['SIAS:conditionalcohol']", ">", 0.0) %>%
+  
+  add_analysis("Duchenne Smiles Behavioral Growth Model", run_robust_growth(dv = "duchenne_smile", 
+                                         baseline_cov = "baseline_duchenne_smile", 
+                                         data = behavioral_df)) %>%
+  
+  # Criterion 1: SIAS Main Effect on Intercept (Shorter durations)
+  add_criterion("sig_sias_int", "p_Satt['SIAS_c']", "<", 0.05) %>%
+  add_criterion("eff_sias_int", "beta['SIAS_c']", "<", 0.0) %>%
+  
+  # Criterion 2: SIAS Main Effect on Slope (Greater minute-to-minute increases)
+  add_criterion("sig_sias_slope", "p_Satt['time_c:SIAS_c']", "<", 0.05) %>%
+  add_criterion("eff_sias_slope", "beta['time_c:SIAS_c']", ">", 0.0) %>%
+  
+  # Criterion 3: Condition Main Effect on Intercept (Alcohol elicits more smiling overall)
+  add_criterion("sig_cond_int", "p_Satt['conditionalcohol']", "<", 0.05) %>%
+  add_criterion("eff_cond_int", "beta['conditionalcohol']", ">", 0.0) %>%
+  
+  # Criterion 4: Two-Way Interaction (Alcohol increases duration more for high SIAS)
+  add_criterion("sig_2way_int", "p_Satt['SIAS_c:conditionalcohol']", "<", 0.05) %>%
+  add_criterion("eff_2way_int", "beta['SIAS_c:conditionalcohol']", "<", 0.0) %>%
+  
+  # Criterion 5: Three-Way Interaction (Alcohol accelerates slope more for high SIAS)
+  add_criterion("sig_3way_slope", "p_Satt['time_c:SIAS_c:conditionalcohol']", "<", 0.05) %>%
+  add_criterion("eff_3way_slope", "beta['time_c:SIAS_c:conditionalcohol']", ">", 0.0) %>%
+  
+  add_analysis("Social Smiles Behavioral Growth Model", run_robust_growth(dv = "social_smile", 
+                                         baseline_cov = "baseline_social_smile", 
+                                         data = behavioral_df)) %>%
+  
+  # Criterion 1: SIAS Main Effect on Intercept (Shorter durations)
+  add_criterion("sig_sias_int2", "p_Satt['SIAS_c']", "<", 0.05) %>%
+  add_criterion("eff_sias_int2", "beta['SIAS_c']", "<", 0.0) %>%
+  
+  # Criterion 2: SIAS Main Effect on Slope (Greater minute-to-minute increases)
+  add_criterion("sig_sias_slope2", "p_Satt['time_c:SIAS_c']", "<", 0.05) %>%
+  add_criterion("eff_sias_slope2", "beta['time_c:SIAS_c']", ">", 0.0) %>%
+  
+  # Criterion 3: Condition Main Effect on Intercept (Alcohol elicits more smiling overall)
+  add_criterion("sig_cond_int2", "p_Satt['conditionalcohol']", "<", 0.05) %>%
+  add_criterion("eff_cond_int2", "beta['conditionalcohol']", ">", 0.0) %>%
+  
+  # Criterion 4: Two-Way Interaction (Alcohol increases duration more for high SIAS)
+  add_criterion("sig_2way_int2", "p_Satt['SIAS_c:conditionalcohol']", "<", 0.05) %>%
+  add_criterion("eff_2way_int2", "beta['SIAS_c:conditionalcohol']", "<", 0.0) %>%
+  
+  # Criterion 5: Three-Way Interaction (Alcohol accelerates slope more for high SIAS)
+  add_criterion("sig_3way_slope2", "p_Satt['time_c:SIAS_c:conditionalcohol']", "<", 0.05) %>%
+  add_criterion("eff_3way_slope2", "beta['time_c:SIAS_c:conditionalcohol']", ">", 0.0) %>%
+  
+  # Evaluation criteria
+  add_eval("corroboration",
+           evaluation = "sig_PAchange_ME & neg_PAchange_ME_direction & sig_PAchange_IE & neg_PAchange_IE_direction &
+           sig_sias_int & eff_sias_int & sig_sias_slope & eff_sias_slope & sig_cond_int & eff_cond_int & 
+           sig_2way_int & eff_2way_int & sig_3way_slope & eff_3way_slope & sig_sias_int2 & eff_sias_int2 & 
+           sig_sias_slope2 & eff_sias_slope2 & sig_cond_int2 & eff_cond_int2 & 
+           sig_2way_int2 & eff_2way_int2 & sig_3way_slope2 & eff_3way_slope2",
+           description = "All main effects, cross-level interactions, and slope trajectories behave as hypothesized with robust p < .05.") %>%
+  
+  add_eval("falsification",
+           evaluation = "!sig_3way_slope | !eff_3way_slope",
+           description = "The target three-way interaction on behavioral trajectory is non-significant or in the wrong direction.")
+```
+
+
+
+```{r}
+study_analyse(bar_prereg)
+study_save(bar_prereg, "Thesis_Prereg.html", format = "prereg")
+```
+
+
+# single measurement interaction
+```{r}
+# 1. Run a standard lm() model strictly for plotting purposes
+plot_na_relief <- lm(relief_NA ~ SIAS * condition, data = self_report_df)
+
+# 2. Feed the standard model into interact_plot
+interact_plot(plot_na_relief, 
+              pred = SIAS, 
+              modx = condition, 
+              plot.points = TRUE, 
+              interval = FALSE,    # Keep this FALSE so it doesn't draw non-robust error bands
+              jitter = 0.1, 
+              point.alpha = 0.3,
+              x.label = "Social Anxiety (SIAS)", 
+              y.label = "Relief of Negative Affect",
+              legend.main = "Condition")
+```
+
+#change measure interaction
+```{r}
+plot_NAchange <- lm(post_NA ~ pre_NA + condition * SIAS, data = self_report_df)
+
+interact_plot(plot_NAchange, 
+              pred = SIAS, 
+              modx = condition, 
+              plot.points = TRUE, 
+              interval = FALSE,    # Keep this FALSE so it doesn't draw non-robust error bands
+              jitter = 0.1, 
+              point.alpha = 0.3,
+              x.label = "Social Anxiety (SIAS)", 
+              y.label = "Post-Drink Negative Affect",
+              legend.main = "Condition")
+```
+
+
+#behavioral measure interaction
+```{r}
+model_duchenne <- lmer(duchenne_smile ~ time_c * condition * SIAS_c + baseline_duchenne_smile + (time_c | subject), 
+                       data = behavioral_df)
+
+# 2. Plot the 3-Way Interaction
+interact_plot(model_duchenne, 
+              pred = time_c,          # X-axis is Time
+              modx = SIAS_c,            # The lines represent different SIAS levels
+              mod2 = condition,       # This creates two separate side-by-side panels!
+              
+              # Aesthetics & Formatting
+              interval = TRUE,        # Adds confidence bands around the trajectories
+              int.width = 0.95, 
+              colors = c("#D55E00", "#009E73", "#0072B2"), # Color-blind friendly palette
+              
+              # Labels
+              x.label = "Time (Minutes 4-35)", 
+              y.label = "Predicted Duchenne Smile Duration (Seconds)",
+              legend.main = "Social Anxiety",
+              mod2.labels = c("Alcohol Condition", "Placebo Condition")) + 
+  
+  # 3. Add standard ggplot theme tweaks to make it clean
+  theme_bw() +
+  theme(strip.text = element_text(size = 12, face = "bold"), # Bolds the panel titles
+        legend.position = "bottom")
+```
+
+
+
+
+
+
+
+
+
+
